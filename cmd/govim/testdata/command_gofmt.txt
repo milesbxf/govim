@@ -1,0 +1,20 @@
+vim ex 'e main.go'
+vim ex '3,5GOVIMGoFmt'
+vim ex 'noautocmd w'
+cmp main.go main.go.golden
+
+-- go.mod --
+module mod
+
+-- main.go --
+package main
+
+func main(){
+fmt.Println("Hello, world")
+}
+-- main.go.golden --
+package main
+
+func main() {
+	fmt.Println("Hello, world")
+}

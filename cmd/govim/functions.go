@@ -156,31 +156,83 @@ func (g *govimplugin) handleBufferEvent(b *types.Buffer) error {
 	return err
 }
 
-func (g *govimplugin) formatCurrentBuffer() (err error) {
-	tool := g.ParseString(g.ChannelExpr(config.GlobalFormatOnSave))
-	vp := g.Viewport()
-	b := g.buffers[vp.Current.BufNr]
+func (g *govimplugin) formatCurrentBuffer() error {
+	tool := config.FormatOnSave(g.ParseString(g.ChannelExpr(config.GlobalFormatOnSave)))
+	// TODO we should move this validation elsewhere...
+	switch tool {
+	case config.FormatOnSaveNone:
+		return nil
+	case config.FormatOnSaveGoFmt, config.FormatOnSaveGoImports:
+	default:
+		return fmt.Errorf("unknown format tool specified for %v: %v", config.GlobalFormatOnSave, tool)
+	}
+	return g.formatCurrentBufferRange(tool, govim.CommandFlags{})
+}
+
+func (g *govimplugin) gofmtCurrentBufferRange(flags govim.CommandFlags, args ...string) error {
+	return g.formatCurrentBufferRange(config.FormatOnSaveGoFmt, flags, args...)
+}
+
+func (g *govimplugin) goimportsCurrentBufferRange(flags govim.CommandFlags, args ...string) error {
+	return g.formatCurrentBufferRange(config.FormatOnSaveGoImports, flags, args...)
+}
+
+func (g *govimplugin) formatCurrentBufferRange(mode config.FormatOnSave, flags govim.CommandFlags, args ...string) error {
+	var err error
+	v := g.Viewport()
+	b := g.buffers[v.Current.BufNr]
 
 	var edits []protocol.TextEdit
 
-	switch config.FormatOnSave(tool) {
-	case config.FormatOnSaveNone:
-		return nil
-	case config.FormatOnSaveGoFmt:
-		params := &protocol.DocumentFormattingParams{
-			TextDocument: b.ToTextDocumentIdentifier(),
-		}
-		edits, err = g.server.Formatting(context.Background(), params)
+	var ran *protocol.Range
+	if flags.Range != nil {
+		start, err := types.PointFromVim(b, *flags.Line1, 1)
 		if err != nil {
-			return fmt.Errorf("failed to call gopls.Formatting: %v", err)
+			return fmt.Errorf("failed to convert start of range (%v, 1) to Point: %v", *flags.Line1, err)
+		}
+		end, err := types.PointFromVim(b, *flags.Line2+1, 1)
+		if err != nil {
+			return fmt.Errorf("failed to convert end of range (%v, 1) to Point: %v", *flags.Line2, err)
+		}
+		ran = &protocol.Range{
+			Start: start.ToPosition(),
+			End:   end.ToPosition(),
+		}
+	}
+
+	switch mode {
+	case config.FormatOnSaveGoFmt:
+		if flags.Range != nil {
+			params := &protocol.DocumentRangeFormattingParams{
+				TextDocument: b.ToTextDocumentIdentifier(),
+				Range:        *ran,
+			}
+			g.Logf("Calling gopls.Formatting: %v", pretty.Sprint(params))
+			edits, err = g.server.RangeFormatting(context.Background(), params)
+			if err != nil {
+				return fmt.Errorf("failed to call gopls.RangeFormatting: %v\nParams were: %v", err, pretty.Sprint(params))
+			}
+		} else {
+			params := &protocol.DocumentFormattingParams{
+				TextDocument: b.ToTextDocumentIdentifier(),
+			}
+			g.Logf("Calling gopls.Formatting: %v", pretty.Sprint(params))
+			edits, err = g.server.Formatting(context.Background(), params)
+			if err != nil {
+				return fmt.Errorf("failed to call gopls.Formatting: %v\nParams were: %v", err, pretty.Sprint(params))
+			}
 		}
 	case config.FormatOnSaveGoImports:
 		params := &protocol.CodeActionParams{
 			TextDocument: b.ToTextDocumentIdentifier(),
 		}
+		if flags.Range != nil {
+			params.Range = *ran
+		}
+		g.Logf("Calling gopls.CodeAction: %v", pretty.Sprint(params))
 		actions, err := g.server.CodeAction(context.Background(), params)
 		if err != nil {
-			return fmt.Errorf("failed to call gopls.CodeAction: %v", err)
+			return fmt.Errorf("failed to call gopls.CodeAction: %v\nParams were: %v", err, pretty.Sprint(params))
 		}
 		want := 1
 		if got := len(actions); want != got {
@@ -188,7 +240,7 @@ func (g *govimplugin) formatCurrentBuffer() (err error) {
 		}
 		edits = (*actions[0].Edit.Changes)[string(b.URI())]
 	default:
-		return fmt.Errorf("unknown format tool specified for %v: %v", config.GlobalFormatOnSave, tool)
+		return fmt.Errorf("unknown format mode specified for %v: %v", config.GlobalFormatOnSave, mode)
 	}
 
 	// see :help wundo. The use of wundo! is significant. It first deletes

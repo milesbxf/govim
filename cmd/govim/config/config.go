@@ -15,6 +15,8 @@ const (
 	CommandGoToDef     Command = "GoToDef"
 	CommandGoToPrevDef Command = "GoToPrevDef"
 	CommandHello       Command = "Hello"
+	CommandGoFmt       Command = "GoFmt"
+	CommandGoImports   Command = "GoImports"
 )
 
 type Function string
