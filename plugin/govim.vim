@@ -98,6 +98,14 @@ function GOVIMPluginStatus(...)
   return s:govim_status
 endfunction
 
+function s:startShutdown()
+  call timer_stop(s:timer)
+  let l:resp = ch_evalexpr(s:channel, ["function", "govim:Shutdown"])
+  if l:resp[0] != ""
+    throw l:resp[0]
+  endif
+endfunction
+
 function s:define(channel, msg)
   " format is [type, ...]
   " type is function, command or autocmd
@@ -107,6 +115,7 @@ function s:define(channel, msg)
     if a:msg[1] == "loaded"
       let s:timer = timer_start(100, function('s:updateViewport'), {'repeat': -1})
       au BufRead,BufNewFile,CursorMoved,CursorMovedI,BufWinEnter * call s:updateViewport(0)
+      au VimLeavePre * call s:startShutdown()
       let s:govim_status = "loaded"
       call s:updateViewport(0)
       for F in s:loadStatusCallbacks

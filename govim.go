@@ -3,6 +3,7 @@ package govim
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,8 @@ const (
 	commHandlePref     = "command:"
 	autoCommHandlePref = "autocommand:"
 
-	sysFuncPref = "govim:"
+	sysFuncPref     = "govim:"
+	sysFuncShutdown = sysFuncPref + "Shutdown"
 )
 
 // callbackResp is the container for a response from a call to callVim. If the
@@ -196,6 +198,7 @@ func (g *govimImpl) Schedule(f func(Govim) error) chan struct{} {
 func (g *govimImpl) load() error {
 	g.funcHandlersLock.Lock()
 	g.funcHandlers[sysFuncOnViewportChange] = internalFunction(g.onViewportChange)
+	g.funcHandlers[sysFuncShutdown] = internalFunction(g.shutdown)
 	g.funcHandlersLock.Unlock()
 	select {
 	case <-g.tomb.Dying():
@@ -239,6 +242,13 @@ func (g *govimImpl) load() error {
 	}
 
 	return nil
+}
+
+var errShuttingDown = errors.New("govim shutting down")
+
+func (g *govimImpl) shutdown(args ...json.RawMessage) (interface{}, error) {
+	g.tomb.Kill(errShuttingDown)
+	return nil, nil
 }
 
 // funcHandler returns the
