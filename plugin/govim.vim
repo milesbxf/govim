@@ -1,17 +1,20 @@
-" TODO we are ignoring windows right now....
-let s:tmpdir = $TMPDIR
-if s:tmpdir == ""
-  let s:tmpdir = "/tmp"
-endif
-let s:ch_logfile = system("mktemp ".s:tmpdir."/vim_channel_log_".strftime("%Y%m%d_%H%M_%S")."_XXXXXXXXXXXX 2>&1")
-if v:shell_error
-  throw s:ch_logfile
-endif
-let s:ch_logfile = trim(s:ch_logfile)
-call ch_logfile(s:ch_logfile, "a")
-echom "Vim channel logfile: ".s:ch_logfile
-call feedkeys(" ") " to prevent press ENTER to continue
-let s:channel = ""
+" " TODO we are ignoring windows right now....
+" let s:tmpdir = $TMPDIR
+" if s:tmpdir == ""
+"   let s:tmpdir = "/tmp"
+" endif
+" let s:ch_logfile = system("mktemp ".s:tmpdir."/vim_channel_log_".strftime("%Y%m%d_%H%M_%S")."_XXXXXXXXXXXX 2>&1")
+" if v:shell_error
+"   throw s:ch_logfile
+" endif
+" let s:ch_logfile = trim(s:ch_logfile)
+" call ch_logfile(s:ch_logfile, "a")
+" echom "Vim channel logfile: ".s:ch_logfile
+" call feedkeys(" ") " to prevent press ENTER to continue
+" let s:channel = ""
+" Useful for debugging
+" call ch_logfile("/tmp/vimchannel.out", "a")
+let s:job = ""
 let s:timer = ""
 let s:currViewport = {}
 let s:sendUpdateViewport = 1
@@ -20,9 +23,11 @@ let s:plugindir = expand(expand("<sfile>:p:h:h"))
 let s:govim_status = "loading"
 let s:loadStatusCallbacks = []
 
-set balloondelay=250
-set ballooneval
-set balloonevalterm
+if has("balloon_eval")
+    set balloondelay=250
+    set ballooneval
+    set balloonevalterm
+endif
 set updatetime=500
 
 " TODO these probably doesn't belong here?
@@ -30,7 +35,8 @@ let g:govim_format_on_save = "goimports"
 
 function s:callbackFunction(name, args)
   let l:args = ["function", "function:".a:name, a:args]
-  let l:resp = ch_evalexpr(s:channel, l:args)
+  echom "Send ".s:job.l:args
+  let l:resp = async#job#send(s:job, json_encode([0, l:args]))
   if l:resp[0] != ""
     throw l:resp[0]
   endif
@@ -39,7 +45,8 @@ endfunction
 
 function s:callbackRangeFunction(name, first, last, args)
   let l:args = ["function", "function:".a:name, a:first, a:last, a:args]
-  let l:resp = ch_evalexpr(s:channel, l:args)
+  echom "Send ".s:job.l:args
+  let l:resp = async#job#send(s:job, json_encode([0, l:args]))
   if l:resp[0] != ""
     throw l:resp[0]
   endif
@@ -49,7 +56,8 @@ endfunction
 function s:callbackCommand(name, flags, ...)
   let l:args = ["function", "command:".a:name, a:flags]
   call extend(l:args, a:000)
-  let l:resp = ch_evalexpr(s:channel, l:args)
+  echom "Send ".s:job.l:args
+  let l:resp = async#job#send(s:job, json_encode([0, l:args]))
   if l:resp[0] != ""
     throw l:resp[0]
   endif
@@ -62,7 +70,8 @@ function s:callbackAutoCommand(name, exprs)
     call add(l:exprVals, eval(e))
   endfor
   let l:args = ["function", a:name, l:exprVals]
-  let l:resp = ch_evalexpr(s:channel, l:args)
+  echom "Send ".s:job.l:args
+  let l:resp = async#job#send(s:job, json_encode([0, l:args]))
   if l:resp[0] != ""
     throw l:resp[0]
   endif
@@ -95,11 +104,12 @@ function s:updateViewport(timer)
   let l:viewport = s:buildCurrentViewport()
   if s:currViewport != l:viewport
     let s:currViewport = l:viewport
-    let l:resp = ch_evalexpr(s:channel, ["function", "govim:OnViewportChange", [l:viewport]])
-    if l:resp[0] != ""
-      " TODO disable the timer and the autocmd callback
-      throw l:resp[0]
-    endif
+  echom "Send updateViewport on ".s:job
+    let l:resp = async#job#send(s:job, json_encode([0, ["function", "govim:OnViewportChange", [l:viewport]]]))
+    " if l:resp[0] != ""
+    "   " TODO disable the timer and the autocmd callback
+    "   throw l:resp[0]
+    " endif
   endif
 endfunction
 
@@ -176,7 +186,8 @@ function s:define(channel, msg)
   catch
     let l:resp[2][0] = 'Caught ' . string(v:exception) . ' in ' . v:throwpoint
   endtry
-  call ch_sendexpr(a:channel, l:resp)
+  echom "Send callback ".a:channel.json_encode([0, l:resp])
+  call async#job#send(a:channel, json_encode([0, l:resp]))
 endfunction
 
 func s:defineAutoCommand(name, def, exprs)
@@ -285,7 +296,7 @@ function s:install(force)
   let targetdir = s:plugindir."/cmd/govim/.bin/".commit."/"
   if a:force || $GOVIM_ALWAYS_INSTALL == "true" || !filereadable(targetdir."govim") || !filereadable(targetdir."gopls")
     echom "Installing govim and gopls"
-    call feedkeys(" ") " to prevent press ENTER to continue
+    " call feedkeys(" ") " to prevent press ENTER to continue
     let oldgobin = $GOBIN
     let oldgomod = $GO111MODULE
     let $GO111MODULE = "on"
@@ -302,17 +313,47 @@ function s:install(force)
   return targetdir
 endfunction
 
+function! s:handleStdout(job_id, data, event_type)
+    echom a:job_id . ' ' . a:event_type
+    echom "'".join(a:data, "','")."'"
+    if a:data[0] != ""
+        let l:json=json_decode(a:data[0])
+        call s:define(a:job_id, l:json[1])
+    else
+        echom "No data received"
+    endif
+endfunction
+
+function! s:handleStderr(job_id, data, event_type)
+    echom 'govim returned error: 'a:data[1]
+endfunction
+
+function! s:handleExit(job_id, data, event_type)
+        call s:govimExit(a:job_id, a:data)
+endfunction
+
 " TODO - would be nice to be able to specify -1 as a timeout
-let opts = {"in_mode": "json", "out_mode": "json", "err_mode": "json", "callback": function("s:define"), "timeout": 30000}
 if $GOVIMTEST_SOCKET != ""
   let s:channel = ch_open($GOVIMTEST_SOCKET, opts)
 else
   let targetdir = s:install(0)
   let start = $GOVIM_RUNCMD
   if start == ""
-    let start = targetdir."govim ".targetdir."gopls"
+    let start = "bash -c 'tee /tmp/govim-stdin | ".targetdir."govim ".targetdir."gopls'"
+    " let start = [targetdir."govim", targetdir."gopls"]
   endif
-  let opts.exit_cb = function("s:govimExit")
-  let job = job_start(start, opts)
-  let s:channel = job_getchannel(job)
+" let argv = {start, "in_mode": "json", "out_mode": "json", "err_mode": "json", "callback": function("s:define"), "timeout": 30000}
+  " let opts.exit_cb = function("s:govimExit")
+
+  let s:job = async#job#start(start, {
+    \ 'on_stdout': function('s:handleStdout'),
+    \ 'on_stderr': function('s:handleStderr'),
+    \ 'on_exit': function('s:handleExit'),
+  \ })
+  if s:job == 0
+      echom 'govim invalid arguments'
+  elseif s:job == -1
+      echom 'govim failed to start'
+  endif
+
 endif
